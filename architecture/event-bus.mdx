@@ -1,0 +1,165 @@
+---
+title: 'In-memory event bus'
+description: 'How the custom publish/subscribe event bus decouples the GetAssets feature from the PriceUpdateWorker background service.'
+keywords: ['event bus', 'publish subscribe', 'InstrumentsSyncedEvent', 'background service', 'decoupling']
+---
+
+The event bus is a lightweight in-process publish/subscribe mechanism. It allows the `GetAssetsHandler` to notify the `PriceUpdateWorker` that the instrument list has changed — **without either component holding a reference to the other**.
+
+This keeps the API layer and the background worker loosely coupled. The handler doesn't know anything about WebSockets; the worker doesn't know anything about HTTP responses.
+
+## Interface
+
+The bus is defined by a two-method interface:
+
+```csharp
+public interface IEventBus
+{
+    void Publish<T>(T @event);
+    void Subscribe<T>(Action<T> handler);
+}
+```
+
+Publishers call `Publish<T>()` with an event object. Subscribers call `Subscribe<T>()` with a callback delegate. The type parameter `T` is the only link between them.
+
+## Implementation
+
+`InMemoryEventBus` stores handlers in a `ConcurrentDictionary` keyed by event type, with each bucket holding a `ConcurrentBag<Delegate>`. Both collections are thread-safe, so publishers and subscribers can operate from different threads without locks.
+
+```csharp
+public class InMemoryEventBus : IEventBus
+{
+    private readonly ConcurrentDictionary<Type, ConcurrentBag<Delegate>> _handlers = new();
+
+    public void Publish<T>(T @event)
+    {
+        if (_handlers.TryGetValue(typeof(T), out var handlers))
+        {
+            foreach (var handler in handlers.Cast<Action<T>>())
+            {
+                handler(@event);
+            }
+        }
+    }
+
+    public void Subscribe<T>(Action<T> handler)
+    {
+        var handlers = _handlers.GetOrAdd(typeof(T), _ => new ConcurrentBag<Delegate>());
+        handlers.Add(handler);
+    }
+}
+```
+
+The bus is registered as a singleton so the same instance is shared across the application lifetime:
+
+```csharp
+services.AddSingleton<IEventBus, InMemoryEventBus>();
+```
+
+## The InstrumentsSyncedEvent
+
+`InstrumentsSyncedEvent` carries the list of instrument IDs that were just synced from Fintacharts:
+
+```csharp
+public sealed class InstrumentsSyncedEvent
+{
+    public IReadOnlyList<string> InstrumentIds { get; }
+
+    public InstrumentsSyncedEvent(IReadOnlyList<string> instrumentIds)
+    {
+        InstrumentIds = instrumentIds;
+    }
+}
+```
+
+## Event flow
+
+<Steps>
+  <Step title="GetAssetsHandler publishes">
+    After upserting instruments into PostgreSQL, the handler calls `eventBus.Publish(new InstrumentsSyncedEvent(instrumentIds))`. This is fire-and-forget — the handler does not wait for subscribers to finish.
+
+    ```csharp
+    eventBus.Publish(new InstrumentsSyncedEvent(instrumentIds));
+    ```
+  </Step>
+  <Step title="PriceUpdateWorker subscribes">
+    In its constructor, the worker registers `OnInstrumentsSynced` as the handler for `InstrumentsSyncedEvent`:
+
+    ```csharp
+    _eventBus.Subscribe<InstrumentsSyncedEvent>(OnInstrumentsSynced);
+    ```
+  </Step>
+  <Step title="Reactive reconnection">
+    `OnInstrumentsSynced` compares the incoming instrument IDs against the current set. If they differ, it updates the list and cancels the active `CancellationTokenSource`, which closes the current WebSocket session.
+
+    ```csharp
+    private void OnInstrumentsSynced(InstrumentsSyncedEvent evt)
+    {
+        var incoming = new HashSet<string>(evt.InstrumentIds);
+        var current = new HashSet<string>(_instrumentIds);
+
+        if (incoming.SetEquals(current))
+        {
+            _logger.LogInformation("Instruments unchanged. Keeping current socket.");
+            return;
+        }
+
+        _logger.LogInformation(
+            "Instrument list changed. Reconnecting. New count: {Count}", evt.InstrumentIds.Count);
+        _instrumentIds = evt.InstrumentIds.ToList();
+        _sessionCts?.Cancel();
+    }
+    ```
+  </Step>
+  <Step title="New WebSocket session opens">
+    The `ExecuteAsync` loop catches the `OperationCanceledException` produced by the cancelled token and immediately starts a new WebSocket session with the updated instrument list — **without restarting the application**.
+
+    ```csharp
+    catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+    {
+        _logger.LogInformation("Reconnecting due to new instrument data...");
+    }
+    ```
+  </Step>
+</Steps>
+
+## CancellationToken session management
+
+The worker maintains two layers of cancellation:
+
+| Token | Created by | Cancelled when |
+|---|---|---|
+| `stoppingToken` | .NET hosting infrastructure | Application shuts down |
+| `_sessionCts` | Worker, per iteration | `OnInstrumentsSynced` receives changed instruments |
+
+A `LinkedTokenSource` combines both so that either condition — shutdown or instrument change — tears down the active WebSocket cleanly:
+
+```csharp
+while (!stoppingToken.IsCancellationRequested)
+{
+    using var combinedCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+    _sessionCts = combinedCts;
+
+    try
+    {
+        await ConnectAndListenAsync(_sessionCts.Token);
+    }
+    catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+    {
+        _logger.LogInformation("Reconnecting due to new instrument data...");
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "WebSocket error. Reconnecting in 5s...");
+        await Task.Delay(5000, stoppingToken);
+    }
+}
+```
+
+<Note>
+  Because `_sessionCts` is assigned inside the loop, each iteration gets a fresh token. Cancelling a previous session never affects the next one.
+</Note>
+
+<Tip>
+  Calling `GET /api/assets` a second time when the instrument list has not changed is safe. The worker detects the unchanged set and keeps the existing WebSocket session open.
+</Tip>

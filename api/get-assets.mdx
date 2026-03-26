@@ -1,0 +1,83 @@
+---
+title: 'Get assets'
+description: 'Synchronize all financial instruments from Fintacharts and start real-time price streaming.'
+---
+
+<Warning>
+  This endpoint must be called once after the service starts. It seeds the local database and publishes an event that triggers the WebSocket price subscription for all instruments. `GET /api/prices` and `GET /api/assets/{id}/history` both depend on the data this call populates.
+</Warning>
+
+## Endpoint
+
+```
+GET /api/assets
+```
+
+## Description
+
+Fetches all financial instruments from the Fintacharts REST API, upserts them into the local PostgreSQL database, and publishes an `InstrumentsSyncedEvent` that starts the WebSocket background worker for real-time price streaming.
+
+Calling this endpoint multiple times is safe — all writes use UPSERT logic, so existing records are updated rather than duplicated.
+
+<Note>
+  No request parameters are required. The endpoint always returns `200 OK` with the full current state of the instruments table.
+</Note>
+
+## Request
+
+No parameters.
+
+```bash cURL
+curl http://localhost:8080/api/assets
+```
+
+## Response
+
+**200 OK**
+
+<ResponseField name="assets" type="object[]" required>
+  Array of all financial instruments stored in the local database.
+
+  <Expandable title="assets[]">
+    <ResponseField name="id" type="string" required>
+      Unique instrument identifier (GUID). Use this value as the `id` path parameter in `GET /api/assets/{id}/history` and as entries in the `ids` query parameter for `GET /api/prices`.
+    </ResponseField>
+    <ResponseField name="symbol" type="string" required>
+      Human-readable ticker symbol, e.g. `EUR/USD`.
+    </ResponseField>
+    <ResponseField name="description" type="string">
+      Optional long-form description of the instrument. May be `null`.
+    </ResponseField>
+    <ResponseField name="kind" type="string" required>
+      Instrument category, e.g. `forex`, `crypto`, `stocks`.
+    </ResponseField>
+    <ResponseField name="provider" type="string" required>
+      Data provider name, e.g. `oanda`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+```json Sample response
+{
+  "assets": [
+    {
+      "id": "ad9e5345-35d3-41d5-a5d7-acb4c5e63b8a",
+      "symbol": "EUR/USD",
+      "description": "Euro vs US Dollar",
+      "kind": "forex",
+      "provider": "oanda"
+    },
+    {
+      "id": "0e81e3ed-9b43-4495-82a0-e7ff5424a90b",
+      "symbol": "BTC/USD",
+      "description": null,
+      "kind": "crypto",
+      "provider": "oanda"
+    }
+  ]
+}
+```
+
+## Error responses
+
+This endpoint does not return error responses. It always returns `200 OK` reflecting the current state of the database, even if it is empty.

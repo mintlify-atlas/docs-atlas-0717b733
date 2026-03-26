@@ -1,0 +1,182 @@
+---
+title: 'Vertical slice architecture'
+description: 'How the codebase is organized into self-contained feature slices that own everything from endpoint registration to business logic.'
+keywords: ['vertical slice', 'VSA', 'feature folders', 'minimal api', 'clean architecture']
+---
+
+Vertical Slice Architecture (VSA) organizes code around **features** rather than technical layers. Instead of shared `Controllers/`, `Services/`, and `Repositories/` folders that span the entire codebase, each feature owns the full stack for its use case — from HTTP routing to data access.
+
+This was chosen over a traditional layered approach for two reasons:
+
+- **Reduced coupling** — a change to `GetPrices` cannot accidentally break `GetAssets`.
+- **Lower cognitive load** — to understand a feature, you read one folder, not four layers.
+
+## Directory structure
+
+```text
+Features/
+├── GetAssets/
+│   ├── GetAssetsEndpoint.cs     # Registers GET /api/assets
+│   ├── GetAssetsHandler.cs      # Business logic
+│   └── GetAssetsResponse.cs     # Response DTO
+├── GetPrices/
+│   ├── GetPricesEndpoint.cs     # Registers GET /api/prices
+│   ├── GetPricesHandler.cs      # Business logic
+│   ├── GetPricesRequest.cs      # Request DTO
+│   ├── GetPricesResponse.cs     # Response DTO
+│   └── GetPricesValidator.cs    # FluentValidation rules
+└── GetPriceHistory/
+    ├── GetPriceHistoryEndpoint.cs
+    ├── GetPriceHistoryHandler.cs
+    ├── GetPriceHistoryRequest.cs
+    ├── GetPriceHistoryResponse.cs
+    └── GetPriceHistoryValidator.cs
+```
+
+## File roles
+
+| File | Role |
+|---|---|
+| `*Endpoint.cs` | Implements `IEndpoint`. Registers the route and delegates to the handler. |
+| `*Handler.cs` | Contains all business logic for the feature. Injected by the DI container. |
+| `*Request.cs` | Immutable record that represents the parsed HTTP request inputs. |
+| `*Response.cs` | Immutable record returned as the JSON response body. |
+| `*Validator.cs` | FluentValidation rules. Applied automatically via the `WithValidation<T>()` extension. |
+
+## IEndpoint contract
+
+All endpoints implement the `IEndpoint` interface. A source generator (`ServiceScan`) discovers every `IEndpoint` implementation at build time and registers them automatically — no manual wiring required.
+
+```csharp
+public interface IEndpoint
+{
+    static abstract void MapEndpoint(IEndpointRouteBuilder app);
+}
+```
+
+## GetAssets slice
+
+This slice fetches instruments from Fintacharts, upserts them into PostgreSQL, and publishes an event to start WebSocket tracking.
+
+**Endpoint** — maps the route and returns a typed result:
+
+```csharp
+public class GetAssetsEndpoint : IEndpoint
+{
+    public static void MapEndpoint(IEndpointRouteBuilder app)
+    {
+        app.MapGet("/api/assets", HandleAsync)
+            .WithTags(EndpointTags.AssetTag)
+            .WithSummary("Get all Assets");
+    }
+
+    private static async Task<Ok<GetAssetsResponse>> HandleAsync(
+        GetAssetsHandler handler,
+        CancellationToken ct)
+    {
+        var assets = await handler.HandleAsync(ct);
+        return TypedResults.Ok(assets);
+    }
+}
+```
+
+**Handler** — owns the business logic, including the event publish:
+
+```csharp
+public class GetAssetsHandler(
+    FintachartsRestClient restClient,
+    AppDbContext db,
+    ILogger<GetAssetsHandler> logger,
+    IEventBus eventBus)
+{
+    public async Task<GetAssetsResponse> HandleAsync(CancellationToken ct = default)
+    {
+        var instruments = await restClient.GetInstrumentsAsync(ct: ct);
+        var instrumentIds = instruments.Select(x => x.Id).ToList();
+
+        foreach (var i in instruments)
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO instruments (id, symbol, description, kind, provider)
+                VALUES ({i.Id}, {i.Symbol}, {i.Description}, {i.Kind}, {FintachartsConstants.DefaultProvider})
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    symbol = EXCLUDED.symbol,
+                    description = EXCLUDED.description,
+                    kind = EXCLUDED.kind,
+                    provider = EXCLUDED.provider
+                """, ct);
+        }
+
+        eventBus.Publish(new InstrumentsSyncedEvent(instrumentIds));
+
+        var items = await db.Instruments
+            .Select(i => new GetAssetsResponseItem(i.Id, i.Symbol, i.Description, i.Kind, i.Provider))
+            .ToArrayAsync(ct);
+
+        return new GetAssetsResponse(items);
+    }
+}
+```
+
+**Response DTOs** — plain records with no behaviour:
+
+```csharp
+public record GetAssetsResponse(
+    GetAssetsResponseItem[] Assets);
+
+public record GetAssetsResponseItem(
+    string Id,
+    string Symbol,
+    string? Description,
+    string Kind,
+    string Provider);
+```
+
+## GetPrices slice
+
+This slice reads prices from the cache first, falling back to PostgreSQL for any cache misses.
+
+**Endpoint** — applies validation before the handler runs:
+
+```csharp
+public class GetPricesEndpoint : IEndpoint
+{
+    public static void MapEndpoint(IEndpointRouteBuilder app)
+    {
+        app.MapGet("/api/prices", HandleAsync)
+            .WithValidation<GetPricesRequest>()
+            .WithTags(EndpointTags.PricesTag)
+            .WithSummary("Get current prices")
+            .WithDescription(
+                "Returns current bid/ask/last prices for specific assets or all available assets if no IDs provided.")
+            .WithParameterDescription("ids", "Array of unique asset identifiers (GUIDs). Leave empty to get all prices.");
+    }
+    // ...
+}
+```
+
+**Request and validator** — a simple record with GUID format enforcement:
+
+```csharp
+public record GetPricesRequest(string[]? ids);
+
+public class GetPricesValidator : AbstractValidator<GetPricesRequest>
+{
+    public GetPricesValidator()
+    {
+        RuleForEach(x => x.ids)
+            .Must(id => Guid.TryParse(id, out _))
+            .WithMessage("Invalid ID format: '{PropertyValue}'. Expected GUID.")
+            .When(x => x != null && x.ids.Length > 0);
+    }
+}
+```
+
+## How slices stay self-contained
+
+<Tip>
+  When adding a new feature, create a new folder under `Features/`. You do not need to modify any existing slice or shared registration code — the source generator picks up the new `IEndpoint` implementation automatically.
+</Tip>
+
+Slices share only thin cross-cutting abstractions: `IEndpoint`, `IEventBus`, and constants. They do not call each other's handlers, share service classes, or inherit from base controllers. Each slice can be understood, tested, and deployed independently.

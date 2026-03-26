@@ -1,0 +1,115 @@
+---
+title: 'Get price history'
+description: 'Return historical 1-minute OHLC bars (close price) for a specific instrument.'
+---
+
+## Endpoint
+
+```
+GET /api/assets/{id}/history
+```
+
+## Description
+
+Fetches historical price bars for a specific instrument directly from the Fintacharts REST API. Returns 1-minute bars in count-back style, where `barsCount` controls how many bars are returned counting backward from the current time. Each bar exposes the close price alongside its timestamp.
+
+## Request
+
+### Path parameters
+
+<ParamField path="id" type="string" required>
+  The instrument GUID. Obtain this value from the `id` field in the `GET /api/assets` response.
+</ParamField>
+
+### Query parameters
+
+<ParamField query="barsCount" type="integer" required>
+  Number of 1-minute bars to return, counting back from now. Must be between `1` and `100` inclusive.
+</ParamField>
+
+### Example
+
+```bash cURL
+curl "http://localhost:8080/api/assets/ad9e5345-35d3-41d5-a5d7-acb4c5e63b8a/history?barsCount=5"
+```
+
+## Response
+
+**200 OK**
+
+<ResponseField name="history" type="object[]" required>
+  Array of historical price bars ordered by time.
+
+  <Expandable title="history[]">
+    <ResponseField name="timestamp" type="string" required>
+      ISO 8601 datetime marking the open time of the 1-minute bar, e.g. `2026-03-26T14:00:00.000Z`.
+    </ResponseField>
+    <ResponseField name="price" type="number" required>
+      Close price of the bar.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+```json Sample response
+{
+  "history": [
+    {
+      "timestamp": "2026-03-26T14:01:00.000Z",
+      "price": 1.08312
+    },
+    {
+      "timestamp": "2026-03-26T14:02:00.000Z",
+      "price": 1.08325
+    },
+    {
+      "timestamp": "2026-03-26T14:03:00.000Z",
+      "price": 1.08318
+    },
+    {
+      "timestamp": "2026-03-26T14:04:00.000Z",
+      "price": 1.08341
+    },
+    {
+      "timestamp": "2026-03-26T14:05:00.000Z",
+      "price": 1.08328
+    }
+  ]
+}
+```
+
+## Error responses
+
+| Status | Description |
+|---|---|
+| `404 Not Found` | No history was returned for the given instrument. Response body: `"No history found for asset: {id}"` |
+| `422 Unprocessable Entity` | The `id` is not a valid GUID, or `barsCount` is out of range. Response body contains FluentValidation error details. |
+
+```json 404 response
+"No history found for asset: ad9e5345-35d3-41d5-a5d7-acb4c5e63b8a"
+```
+
+```json 422 response — invalid GUID
+{
+  "type": "https://tools.ietf.org/html/rfc4918#section-11.2",
+  "title": "One or more validation errors occurred.",
+  "status": 422,
+  "errors": {
+    "id": [
+      "Invalid ID format: 'not-a-guid'. Expected GUID."
+    ]
+  }
+}
+```
+
+```json 422 response — barsCount out of range
+{
+  "type": "https://tools.ietf.org/html/rfc4918#section-11.2",
+  "title": "One or more validation errors occurred.",
+  "status": 422,
+  "errors": {
+    "barsCount": [
+      "Bars count must be greater than zero."
+    ]
+  }
+}
+```

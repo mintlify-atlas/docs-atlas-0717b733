@@ -1,0 +1,137 @@
+---
+title: "Database"
+description: "PostgreSQL schema and Entity Framework Core migrations"
+---
+
+Fintacharts Asset Tracker uses **PostgreSQL 16** as its persistent store. Entity Framework Core manages the schema through code-first migrations, and the application applies any pending migrations automatically on startup.
+
+## Connection string
+
+The connection string is supplied via the `FINTA_DB_CONNECTION` environment variable, which maps to `ConnectionStrings__Default` inside the container.
+
+```bash .env.example
+FINTA_DB_CONNECTION=Host=postgres;Port=5432;Database=asset_tracker;Username=postgres;Password=postgres
+```
+
+| Parameter | Value |
+|---|---|
+| Host | `postgres` (Docker Compose service name) |
+| Port | `5432` |
+| Database | `asset_tracker` |
+| Username | `postgres` |
+| Password | `postgres` (default; change for production) |
+
+## Schema
+
+The database contains two tables.
+
+### instruments
+
+Stores the financial instruments fetched from the Fintacharts API.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | `text` | Primary key |
+| `symbol` | `text` | Not null |
+| `description` | `text` | Nullable |
+| `kind` | `text` | Not null |
+| `provider` | `text` | Not null |
+
+### asset_prices
+
+Stores the latest price tick for each instrument. The unique index on `instrument_id` is the conflict target for the UPSERT — only one price row per instrument is kept.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | `integer` | Primary key, auto-increment |
+| `instrument_id` | `text` | Foreign key → `instruments.id` (cascade delete), unique |
+| `bid` | `numeric` | Not null |
+| `ask` | `numeric` | Not null |
+| `last` | `numeric` | Not null |
+| `updated_at` | `timestamp with time zone` | Not null |
+
+## UPSERT patterns
+
+Both tables use `INSERT ... ON CONFLICT DO UPDATE` (PostgreSQL UPSERT) to avoid duplicates and handle concurrent updates efficiently.
+
+### Inserting instruments (`GetAssetsHandler`)
+
+Called once per instrument when `GET /api/assets` runs. If the instrument already exists its metadata is updated in place.
+
+```sql
+INSERT INTO instruments (id, symbol, description, kind, provider)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (id)
+DO UPDATE SET
+    symbol      = EXCLUDED.symbol,
+    description = EXCLUDED.description,
+    kind        = EXCLUDED.kind,
+    provider    = EXCLUDED.provider
+```
+
+### Upserting prices (`PriceUpdateWorker.SavePriceAsync`)
+
+Called on every WebSocket tick. The unique index on `instrument_id` is the conflict target, so each instrument always has exactly one row in `asset_prices`.
+
+```sql
+INSERT INTO asset_prices (instrument_id, bid, ask, last, updated_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (instrument_id)
+DO UPDATE SET
+    bid        = EXCLUDED.bid,
+    ask        = EXCLUDED.ask,
+    last       = EXCLUDED.last,
+    updated_at = EXCLUDED.updated_at
+```
+
+## Naming convention
+
+<Note>
+  EF Core models use PascalCase property names, but the database uses snake_case column and table names. This mapping is applied globally via `UseSnakeCaseNamingConvention()` in `DependencyInjection.cs`. For example, the C# property `InstrumentId` becomes the column `instrument_id`, and the entity `AssetPrice` becomes the table `asset_prices`.
+</Note>
+
+```csharp Bootstrap/DependencyInjection.cs
+services.AddDbContext<AppDbContext>(opt =>
+    opt.UseNpgsql(configuration.GetConnectionString("Default"))
+        .UseSnakeCaseNamingConvention());
+```
+
+## Migrations
+
+Migrations are managed with the EF Core CLI and are applied automatically when the application starts.
+
+### How automatic migration works
+
+`Program.cs` calls `app.ApplyMigrations()` before the HTTP pipeline begins handling requests:
+
+```csharp Program.cs
+app.ApplyMigrations();
+```
+
+This calls `context.Database.Migrate()`, which applies all pending migrations in order:
+
+```csharp Shared/Extensions/MigrationsExtension.cs
+public static void ApplyMigrations(this IApplicationBuilder app)
+{
+    using var scope = app.ApplicationServices.CreateScope();
+    using var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+    context.Database.Migrate();
+}
+```
+
+### Migration history
+
+| Migration | Description |
+|---|---|
+| `20260323100955_InitialCreate` | Creates `instruments` and `asset_prices` tables |
+| `20260323113400_AllowNullDescription` | Makes `instruments.description` nullable |
+| `20260324083111_AddUniqueIndexOnAssetPriceInstrumentId` | Adds unique index on `asset_prices.instrument_id` (UPSERT target) |
+
+## Data persistence
+
+The `postgres-data` Docker named volume is declared in `compose.yaml` and mounted at `/var/lib/postgresql/data` inside the `postgres` container. Data is preserved across `docker-compose down` and container restarts. To wipe the database, remove the volume explicitly:
+
+```bash
+docker-compose down -v
+```

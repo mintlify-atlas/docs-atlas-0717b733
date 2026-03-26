@@ -1,0 +1,49 @@
+---
+title: 'API overview'
+description: 'Base URL, available endpoints, and usage notes for the Fintacharts Asset Tracker API.'
+---
+
+The Fintacharts Asset Tracker exposes a JSON REST API for synchronizing financial instruments, querying real-time prices, and retrieving historical OHLC data.
+
+| Property | Value |
+|---|---|
+| Base URL | `http://localhost:8080` |
+| Swagger UI | `http://localhost:8080/swagger` |
+| Content type | `application/json` |
+| Authentication | None (auth to Fintacharts is handled internally) |
+
+<Warning>
+  **Call `GET /api/assets` first.** This endpoint must be called once after starting the service. It seeds the local database with instruments from Fintacharts and starts the WebSocket price subscription background worker. All other endpoints depend on data this call populates.
+</Warning>
+
+## Endpoints
+
+<CardGroup cols={3}>
+  <Card title="GET /api/assets" icon="database" href="/api/get-assets">
+    Synchronize all financial instruments from Fintacharts into the local database and start real-time price streaming.
+  </Card>
+  <Card title="GET /api/prices" icon="chart-line" href="/api/get-prices">
+    Return current bid, ask, and last prices for all instruments or a specific subset by GUID.
+  </Card>
+  <Card title="GET /api/assets/{id}/history" icon="clock-rotate-left" href="/api/get-price-history">
+    Return historical 1-minute OHLC bars (close price) for a specific instrument, counting back from now.
+  </Card>
+</CardGroup>
+
+## Quick examples
+
+```bash Seed the database and start price streaming
+curl http://localhost:8080/api/assets
+```
+
+```bash Get current prices for all instruments
+curl http://localhost:8080/api/prices
+```
+
+```bash Get current prices for specific instruments
+curl "http://localhost:8080/api/prices?ids=ad9e5345-35d3-41d5-a5d7-acb4c5e63b8a&ids=0e81e3ed-9b43-4495-82a0-e7ff5424a90b"
+```
+
+```bash Get 30 bars of price history for an instrument
+curl "http://localhost:8080/api/assets/ad9e5345-35d3-41d5-a5d7-acb4c5e63b8a/history?barsCount=30"
+```

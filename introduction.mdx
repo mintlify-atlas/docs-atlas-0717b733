@@ -1,0 +1,76 @@
+---
+title: "Introduction"
+description: "Fintacharts Asset Tracker is a high-performance .NET 8 backend service that synchronizes financial instruments, streams real-time prices via WebSockets, and exposes market data through a REST API."
+---
+
+## What is Fintacharts Asset Tracker?
+
+Fintacharts Asset Tracker is a market data tracking service built with **.NET 8**. It connects to the [Fintacharts](https://platform.fintacharts.com/) platform to synchronize financial instruments, maintains live price feeds over WebSockets, and surfaces that data through a clean REST API.
+
+The service is fully containerized with Docker Compose and ships with Swagger UI for interactive exploration out of the box.
+
+<Warning>
+  **Initialization required.** After launching the application, you **must** call `GET /api/assets` first. This seeds the local database with instruments and publishes an `InstrumentsSyncedEvent` on the internal event bus, which signals the background worker to open WebSocket subscriptions for all synced assets. Nothing else will work correctly until this step is completed.
+</Warning>
+
+## Key Features
+
+### Vertical Slice Architecture
+
+The codebase is organized into self-contained feature slices — `GetAssets`, `GetPrices`, and `GetPriceHistory` — rather than traditional horizontal layers. Each slice owns its own handler, validator, and data access logic, reducing coupling and cognitive overhead.
+
+### Real-Time WebSocket Streaming
+
+A dedicated `PriceUpdateWorker` background service maintains a persistent WebSocket connection to Fintacharts. When new assets are synced, the worker gracefully cancels its current session and reconnects with updated subscriptions — no application restart required. Authentication is handled automatically by the built-in `FintachartsTokenManager`, which refreshes tokens in the background.
+
+### Two-Layer Caching
+
+Price data is cached at two levels for sub-millisecond read latency:
+
+- **L1 — In-Memory:** A thread-safe `ConcurrentDictionary` provides O(1) access to the latest market tick for each instrument.
+- **L2 — Persistent:** PostgreSQL 16 with `ON CONFLICT DO UPDATE` (UPSERT) absorbs high-frequency updates without unbounded table growth.
+
+### In-Memory Event Bus
+
+A lightweight custom event bus decouples the `GetAssets` feature from the `PriceUpdateWorker`. The event flow is:
+
+```
+GET /api/assets → GetAssets Feature → InstrumentsSyncedEvent → PriceUpdateWorker → WebSocket
+```
+
+### Docker Compose
+
+A single `compose.yaml` spins up both the API (`asset-tracker`, port `8080`) and a PostgreSQL 16 database (`asset-tracker-postgres`, port `5432`). The API container waits for the database health check before starting, and Entity Framework migrations are applied automatically on startup.
+
+### Swagger UI
+
+Swagger UI is enabled in the `Development` environment and is available at `http://localhost:8080/swagger` immediately after launch.
+
+## Tech Stack
+
+| Component | Technology |
+|---|---|
+| Runtime | .NET 8 / C# 12 |
+| Web framework | ASP.NET Core Minimal API |
+| Database | PostgreSQL 16 |
+| ORM | Entity Framework Core |
+| Validation | FluentValidation |
+| Containerization | Docker / Docker Compose |
+| API docs | Swagger / OpenAPI 3 |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Clone the repo, configure your credentials, and have the service running in minutes.
+  </Card>
+  <Card title="API Overview" icon="code" href="/api/overview">
+    Explore the three REST endpoints: assets, prices, and price history.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Deep-dive into Vertical Slice Architecture, the event bus, and caching design.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/environment-variables">
+    Reference for all environment variables and `appsettings.json` options.
+  </Card>
+</CardGroup>

@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Fintacharts Asset Tracker",
+  "projectType": "api-service",
+  "projectName": "Fintacharts Asset Tracker",
+  "projectDescription": "A .NET 8 backend service that synchronizes financial instruments from Fintacharts, streams real-time prices via WebSockets, and exposes market data through a REST API.",
   "theme": "luma",
-  "colors": {
-    "primary": "#2563EB",
-    "light": "#DBEAFE",
-    "dark": "#1E3A8A"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/9asmodey6/Fintacharts.AssetTracker"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/9asmodey6/Fintacharts.AssetTracker"
-    }
-  },
+  "primaryColor": "#2563EB",
+  "lightColor": "#DBEAFE",
+  "darkColor": "#1E3A8A",
   "navigation": {
     "tabs": [
       {
@@ -70,5 +58,21 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Vertical Slice Architecture with self-contained feature slices",
+    "Real-time price streaming via WebSockets (Fintacharts l1-subscription)",
+    "In-memory event bus for reactive background service orchestration",
+    "Two-layer caching: ConcurrentDictionary (L1) + PostgreSQL UPSERT (L2)",
+    "Automatic token management with thread-safe refresh logic",
+    "Docker Compose deployment with PostgreSQL 16",
+    "OpenAPI/Swagger UI at /swagger",
+    "Graceful WebSocket session management with reactive reconnection"
+  ],
+  "publicApiSurface": [
+    "GET /api/assets",
+    "GET /api/prices",
+    "GET /api/prices?ids={guid1}&ids={guid2}",
+    "GET /api/assets/{id}/history?barsCount={n}"
+  ]
 }

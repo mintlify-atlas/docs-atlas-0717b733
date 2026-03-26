@@ -1,0 +1,152 @@
+---
+title: 'Caching strategy'
+description: 'The two-layer cache that delivers sub-millisecond price reads via an in-memory ConcurrentDictionary and persists data to PostgreSQL with UPSERT semantics.'
+keywords: ['caching', 'PriceCache', 'ConcurrentDictionary', 'PostgreSQL', 'UPSERT', 'performance']
+---
+
+The Asset Tracker uses a two-layer caching strategy to balance response speed with durability:
+
+- **L1 (in-memory):** A `ConcurrentDictionary` inside `PriceCache` holds the latest price for every tracked instrument. Reads are O(1) and take less than a millisecond.
+- **L2 (persistent):** PostgreSQL stores the same prices with `ON CONFLICT DO UPDATE` UPSERT semantics, so data survives application restarts and is available for historical queries.
+
+## L1 — in-memory cache
+
+`PriceCache` is a singleton that wraps a `ConcurrentDictionary<string, CachedPrice>`. All reads and writes are thread-safe without explicit locking.
+
+```csharp
+public class PriceCache
+{
+    private readonly ConcurrentDictionary<string, CachedPrice> _prices = new();
+
+    public void Set(string instrumentId, CachedPrice price)
+    {
+        _prices[instrumentId] = price;
+    }
+
+    public CachedPrice? Get(string instrumentId)
+    {
+        return _prices.GetValueOrDefault(instrumentId);
+    }
+
+    public IReadOnlyDictionary<string, CachedPrice> GetAll()
+    {
+        return _prices;
+    }
+
+    public bool TryGet(string instrumentId, [NotNullWhen(true)] out CachedPrice? price)
+    {
+        return _prices.TryGetValue(instrumentId, out price);
+    }
+}
+
+public record CachedPrice(
+    decimal Bid,
+    decimal Ask,
+    decimal Last,
+    DateTime UpdatedAt);
+```
+
+The cache is registered as a singleton so both the `PriceUpdateWorker` (writer) and `GetPricesHandler` (reader) share the same instance:
+
+```csharp
+services.AddSingleton<PriceCache>();
+```
+
+## L2 — PostgreSQL persistence
+
+Every price tick received from the Fintacharts WebSocket is persisted to the `asset_prices` table using a raw UPSERT query. This avoids insert conflicts on high-frequency updates and prevents table bloat from duplicate rows:
+
+```csharp
+private async Task SavePriceAsync(
+    string instrumentId,
+    CachedPrice price,
+    CancellationToken ct)
+{
+    using var scope = _scopeFactory.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+    var updatedAtUtc = price.UpdatedAt.Kind == DateTimeKind.Unspecified
+        ? DateTime.SpecifyKind(price.UpdatedAt, DateTimeKind.Utc)
+        : price.UpdatedAt.ToUniversalTime();
+
+    await db.Database.ExecuteSqlInterpolatedAsync($"""
+        INSERT INTO asset_prices (instrument_id, bid, ask, last, updated_at)
+        VALUES ({instrumentId}, {price.Bid}, {price.Ask}, {price.Last}, {updatedAtUtc})
+        ON CONFLICT (instrument_id)
+        DO UPDATE SET
+            bid = EXCLUDED.bid,
+            ask = EXCLUDED.ask,
+            last = EXCLUDED.last,
+            updated_at = EXCLUDED.updated_at
+        """, ct);
+}
+```
+
+The `ON CONFLICT (instrument_id) DO UPDATE` clause ensures there is always exactly **one row per instrument** in the table, containing the most recent tick. There is no accumulation of stale rows.
+
+<Note>
+  `ExecuteSqlInterpolatedAsync` uses parameterized queries internally. The interpolated values are never concatenated as raw SQL, so there is no SQL injection risk.
+</Note>
+
+## Read path
+
+The `GetPricesHandler` consults both layers in order:
+
+<Steps>
+  <Step title="Check L1 for each requested ID">
+    For each instrument ID in the request, `TryGet` is called on `PriceCache`. A hit returns the price immediately without touching the database.
+
+    ```csharp
+    foreach (var id in ids)
+    {
+        if (cache.TryGet(id, out var cached))
+        {
+            result.Add(MapToResponse(id, cached));
+        }
+        else
+        {
+            missingInCache.Add(id);
+        }
+    }
+    ```
+  </Step>
+  <Step title="Fall back to L2 for cache misses">
+    Any IDs not found in memory are batched into a single database query:
+
+    ```csharp
+    if (missingInCache.Count > 0)
+    {
+        var dbPrices = await db.AssetPrices
+            .Where(p => missingInCache.Contains(p.InstrumentId))
+            .ToListAsync(ct);
+
+        result.AddRange(dbPrices.Select(p => MapToResponse(p.InstrumentId, p)));
+    }
+    ```
+  </Step>
+  <Step title="All-prices shortcut">
+    When no IDs are specified, the handler calls `cache.GetAll()` for a single dictionary snapshot. It only queries PostgreSQL if the cache is completely empty (for example, immediately after a cold restart before the first WebSocket tick arrives).
+  </Step>
+</Steps>
+
+## Write path
+
+The `PriceUpdateWorker` writes to both layers on every tick, in this order:
+
+1. `_cache.Set(message.InstrumentId!, price)` — updates L1 synchronously.
+2. `await SavePriceAsync(...)` — persists to L2 asynchronously.
+
+Because L1 is updated first, the next `GET /api/prices` request will see the latest price even if the database write is still in flight.
+
+## When each layer is used
+
+| Scenario | Layer used |
+|---|---|
+| `GET /api/prices` — normal operation | L1 (in-memory) |
+| `GET /api/prices` — cache miss or cold start | L2 (PostgreSQL) |
+| `GET /api/assets/{id}/history` | Fintacharts REST API (bypasses cache and database) |
+| Writing a new tick from WebSocket | Both L1 and L2 |
+
+<Warning>
+  The cache is populated only while the `PriceUpdateWorker` is receiving ticks. If the WebSocket connection drops and has not yet reconnected, L1 may return stale data. The `UpdatedAt` field on each `CachedPrice` lets clients detect staleness.
+</Warning>

@@ -1,0 +1,171 @@
+---
+title: "Docker deployment"
+description: "Deploy Fintacharts Asset Tracker using Docker Compose"
+---
+
+The project ships with a `compose.yaml` that starts two services: `postgres` (PostgreSQL 16) and `api` (the .NET 8 application). Docker Compose handles service ordering — the API container only starts after PostgreSQL passes its health check.
+
+## compose.yaml
+
+```yaml compose.yaml
+services:
+  postgres:
+    image: postgres:16
+    container_name: asset-tracker-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: asset_tracker
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d asset_tracker" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  
+  api:
+    build:
+      context: .
+      dockerfile: Fintacharts.AssetTracker/Dockerfile
+    container_name: asset-tracker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+       - ASPNETCORE_ENVIRONMENT=Development
+       - ConnectionStrings__Default=${FINTA_DB_CONNECTION}
+       - Fintacharts__BaseUrl=${FINTA_BASE_URL}
+       - Fintacharts__WssUrl=${FINTA_WSS_URL}
+       - Fintacharts__Username=${FINTA_USER}
+       - Fintacharts__Password=${FINTA_PASS}
+       - Fintacharts__Realm=${FINTA_REALM}
+       - Fintacharts__ClientId=${FINTA_CLIENT_ID}
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-data:
+```
+
+## Services
+
+### postgres
+
+| Property | Value |
+|---|---|
+| Image | `postgres:16` |
+| Container name | `asset-tracker-postgres` |
+| Port | `5432:5432` |
+| Volume | `postgres-data` (persists data across restarts) |
+| Health check | `pg_isready -U postgres -d asset_tracker` every 5 s, 5 retries |
+
+### api
+
+| Property | Value |
+|---|---|
+| Build context | Repository root, `Fintacharts.AssetTracker/Dockerfile` |
+| Container name | `asset-tracker` |
+| Depends on | `postgres` with `condition: service_healthy` |
+| Port | `8080:8080` |
+| Environment | Variables loaded from `.env` (see [Environment variables](/configuration/environment-variables)) |
+
+## Dockerfile
+
+The Dockerfile uses a multi-stage build to keep the final image small.
+
+```dockerfile Fintacharts.AssetTracker/Dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
+WORKDIR /app
+EXPOSE 8080
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+COPY ["Fintacharts.AssetTracker/Fintacharts.AssetTracker.csproj", "Fintacharts.AssetTracker/"]
+RUN dotnet restore "Fintacharts.AssetTracker/Fintacharts.AssetTracker.csproj"
+
+COPY . .
+WORKDIR "/src/Fintacharts.AssetTracker"
+RUN dotnet publish -c Release -o /app/publish
+
+FROM base AS final
+WORKDIR /app
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "Fintacharts.AssetTracker.dll"]
+```
+
+## Deployment steps
+
+<Steps>
+  <Step title="Install Docker and Docker Compose">
+    Ensure [Docker Desktop](https://docs.docker.com/get-docker/) (or Docker Engine + the Compose plugin) is installed and running on your machine.
+  </Step>
+
+  <Step title="Configure environment variables">
+    Copy the example file and fill in your Fintacharts credentials:
+
+    ```bash
+    cp .env.example .env
+    ```
+
+    Open `.env` and set at minimum:
+
+    ```bash .env
+    FINTA_DB_CONNECTION=Host=postgres;Port=5432;Database=asset_tracker;Username=postgres;Password=postgres
+
+    FINTA_BASE_URL=https://platform.fintacharts.com/
+    FINTA_WSS_URL=wss://platform.fintacharts.com
+    FINTA_USER=your_username_here
+    FINTA_PASS=your_password_here
+    FINTA_REALM=fintatech
+    FINTA_CLIENT_ID=app-cli
+    ```
+
+    <Warning>
+      Never commit the `.env` file to version control. It is already listed in `.gitignore`.
+    </Warning>
+  </Step>
+
+  <Step title="Build and start the containers">
+    From the repository root:
+
+    ```bash
+    docker-compose up --build
+    ```
+
+    Docker builds the .NET image, starts `asset-tracker-postgres`, waits for the health check to pass, then starts `asset-tracker`.
+  </Step>
+
+  <Step title="Wait for both containers to be ready">
+    Watch the logs until you see the API listening message. The `api` service will not start until `postgres` reports healthy — you do not need to do anything manually.
+  </Step>
+
+  <Step title="Open Swagger UI">
+    Navigate to [http://localhost:8080/swagger](http://localhost:8080/swagger) to access the interactive API documentation.
+  </Step>
+
+  <Step title="Call GET /api/assets to initialize the tracker">
+    Execute the `GET /api/assets` endpoint from Swagger (or with `curl`). This step is required before price data becomes available.
+
+    <Warning>
+      You **must** call `GET /api/assets` first. This endpoint seeds the database with instruments and fires the internal `InstrumentsSyncedEvent`, which instructs the background `PriceUpdateWorker` to open a WebSocket connection and begin streaming live price updates. Skipping this step means no prices will be tracked.
+    </Warning>
+  </Step>
+</Steps>
+
+## Health check
+
+The `postgres` service runs `pg_isready -U postgres -d asset_tracker` every 5 seconds. Docker Compose marks the container healthy only after it passes. The `api` service has `condition: service_healthy` on its `depends_on` entry, so it will not start — and will not attempt a database connection — until PostgreSQL is fully accepting connections.
+
+## Common commands
+
+| Task | Command |
+|---|---|
+| Build and start all services | `docker-compose up --build` |
+| Stop and remove containers | `docker-compose down` |
+| View API logs | `docker-compose logs api` |
+| Restart the API container | `docker-compose restart api` |

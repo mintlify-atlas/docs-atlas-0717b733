@@ -1,0 +1,89 @@
+---
+title: "Logging"
+description: "Understand and configure application log levels"
+---
+
+The application uses the standard ASP.NET Core logging pipeline. Log verbosity is controlled by the `Logging.LogLevel` section in `appsettings.json`.
+
+## Default configuration
+
+```json appsettings.json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.EntityFrameworkCore.Database.Command": "Warning",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  }
+}
+```
+
+## Logger namespaces
+
+| Namespace | Level | Purpose |
+| --- | --- | --- |
+| `Default` | `Information` | Core application events: startup, instrument sync, WebSocket connection status, token refresh |
+| `Microsoft.EntityFrameworkCore.Database.Command` | `Warning` | Suppresses verbose SQL query logs from EF Core |
+| `Microsoft.AspNetCore` | `Warning` | Suppresses ASP.NET Core framework request pipeline logs |
+
+## Log levels
+
+### Information (default)
+
+The `Information` level logs core system events that are useful in any environment:
+
+- Application startup
+- Instrument synchronization results (count of instruments fetched)
+- WebSocket connection established or disconnected
+- Token acquisition and background refresh events
+
+Example output at `Information`:
+
+```text
+info: PriceUpdateWorker[0]
+      Starting WebSocket session for 42 instruments.
+info: FintachartsTokenManager[0]
+      Access token refreshed successfully.
+info: PriceUpdateWorker[0]
+      WebSocket connection established.
+info: GetAssetsHandler[0]
+      Instruments synced: 42 assets saved to database.
+```
+
+### Debug
+
+The `Debug` level additionally logs each individual price tick received over the WebSocket connection. Because the application subscribes to real-time price feeds, this output is high-frequency and can be noisy in a busy market session.
+
+Each tick log entry includes:
+
+- **Symbol** — the instrument identifier
+- **Bid** — current bid price
+- **Ask** — current ask price
+- **Last** — last traded price
+- **Timestamp** — tick timestamp from the exchange
+
+Example output at `Debug`:
+
+```text
+dbug: PriceUpdateWorker[0]
+      Tick received: AAPL | Bid: 212.45 | Ask: 212.47 | Last: 212.46 | Time: 2026-03-26T10:32:01Z
+dbug: PriceUpdateWorker[0]
+      Tick received: EURUSD | Bid: 1.08312 | Ask: 1.08315 | Last: 1.08313 | Time: 2026-03-26T10:32:01Z
+```
+
+## Enabling debug logging
+
+To see live price ticks in the console, change `Default` to `Debug` in `appsettings.json`:
+
+```json appsettings.json
+"Logging": {
+  "LogLevel": {
+    "Default": "Debug"
+  }
+}
+```
+
+<Tip>
+  Keep `Default` at `Information` in production. The `Debug` level logs every incoming price tick, which adds significant noise and increases I/O. Use `Debug` only when actively developing or troubleshooting real-time data issues.
+</Tip>

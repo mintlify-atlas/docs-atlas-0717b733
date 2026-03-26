@@ -1,0 +1,89 @@
+---
+title: 'Architecture overview'
+description: 'How the Fintacharts Asset Tracker is structured end-to-end, from REST clients to real-time WebSocket data.'
+keywords: ['architecture', 'overview', 'event-driven', 'websocket', 'background service']
+---
+
+Fintacharts Asset Tracker is a high-performance market data service built on **.NET 8**. It synchronizes financial instruments from the Fintacharts platform, tracks real-time price updates over WebSockets, and exposes historical data through a REST API.
+
+The system is organized around three core design principles:
+
+- **Minimal coupling** — features are self-contained; nothing shares logic it doesn't own.
+- **Reactive background processing** — the background worker responds to events rather than polling.
+- **Clean separation of concerns** — infrastructure, domain, and API surface are distinct layers.
+
+## System diagram
+
+```text
+         ┌──────────────┐
+         │   Swagger    │
+         │   Client     │
+         └──────┬───────┘
+                │
+                ▼
+       GET /api/assets
+                │
+                ▼
+       GetAssets Feature
+                │
+                ▼
+     InstrumentsSyncedEvent
+                │
+                ▼
+       PriceUpdateWorker
+                │
+        WebSocket (Fintacharts)
+                │
+                ▼
+       Real-time price updates
+          │             │
+          ▼             ▼
+     PriceCache     PostgreSQL
+```
+
+## End-to-end flow
+
+<Steps>
+  <Step title="Seed instruments">
+    A client calls `GET /api/assets`. The `GetAssetsHandler` fetches all financial instruments from the Fintacharts REST API and upserts them into PostgreSQL. It then publishes an `InstrumentsSyncedEvent` containing the full list of instrument IDs.
+  </Step>
+  <Step title="Event triggers the worker">
+    The `PriceUpdateWorker` background service is subscribed to `InstrumentsSyncedEvent`. On receipt it cancels any existing WebSocket session and opens a new one, subscribing to real-time `l1-subscription` feeds for every instrument.
+  </Step>
+  <Step title="Live price ingestion">
+    As ticks arrive over the WebSocket, the worker writes each price to the in-memory `PriceCache` (L1) and persists it to PostgreSQL with an `ON CONFLICT DO UPDATE` UPSERT (L2).
+  </Step>
+  <Step title="API responses">
+    `GET /api/prices` reads from the in-memory cache for sub-millisecond responses and falls back to PostgreSQL when the cache is cold. `GET /api/assets/{id}/history` fetches historical 1-minute bars directly from the Fintacharts REST API on each request.
+  </Step>
+</Steps>
+
+<Note>
+  You must call `GET /api/assets` at least once after startup. This step seeds the database and fires the event that activates WebSocket subscriptions. Without it, `GET /api/prices` returns no data.
+</Note>
+
+## Core features
+
+The API surface consists of three vertical slices:
+
+| Slice | Route | Purpose |
+|---|---|---|
+| `GetAssets` | `GET /api/assets` | Sync instruments from Fintacharts and return them |
+| `GetPrices` | `GET /api/prices` | Return current bid/ask/last prices for all or selected assets |
+| `GetPriceHistory` | `GET /api/assets/{id}/history` | Fetch historical 1-minute bars for a specific asset from the Fintacharts REST API |
+
+Each slice owns its endpoint, handler, request/response DTOs, and validator. See [Vertical Slice Architecture](/architecture/vertical-slice) for the full breakdown.
+
+## Architecture pages
+
+<CardGroup cols={3}>
+  <Card title="Vertical slice architecture" icon="layers" href="/architecture/vertical-slice">
+    How features are organized as self-contained slices with no shared business logic.
+  </Card>
+  <Card title="In-memory event bus" icon="zap" href="/architecture/event-bus">
+    How `GetAssetsHandler` and `PriceUpdateWorker` communicate without direct coupling.
+  </Card>
+  <Card title="Caching strategy" icon="database" href="/architecture/caching">
+    The two-layer cache that delivers sub-millisecond reads while persisting data across restarts.
+  </Card>
+</CardGroup>

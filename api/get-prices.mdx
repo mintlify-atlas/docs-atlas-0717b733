@@ -1,0 +1,105 @@
+---
+title: 'Get prices'
+description: 'Return current bid, ask, and last prices for all instruments or a specific subset.'
+---
+
+## Endpoint
+
+```
+GET /api/prices
+```
+
+## Description
+
+Returns current bid, ask, and last prices for financial instruments. Prices are served from an in-memory cache populated by the WebSocket background worker. When a requested instrument is not in the cache, the handler falls back to the database.
+
+<Note>
+  Prices will be empty until `GET /api/assets` has been called to seed the database and start the WebSocket subscription. Cache reads are sub-millisecond.
+</Note>
+
+## Request
+
+<ParamField query="ids" type="string[]">
+  Array of unique asset identifiers (GUIDs). Repeat the parameter for each ID: `?ids=guid1&ids=guid2`. When omitted, prices for all instruments are returned.
+</ParamField>
+
+### Examples
+
+```bash Get prices for all instruments
+curl http://localhost:8080/api/prices
+```
+
+```bash Get prices for specific instruments
+curl "http://localhost:8080/api/prices?ids=ad9e5345-35d3-41d5-a5d7-acb4c5e63b8a&ids=0e81e3ed-9b43-4495-82a0-e7ff5424a90b"
+```
+
+## Response
+
+**200 OK**
+
+<ResponseField name="prices" type="object[]" required>
+  Array of current price entries.
+
+  <Expandable title="prices[]">
+    <ResponseField name="instrumentId" type="string" required>
+      The instrument GUID this price entry belongs to.
+    </ResponseField>
+    <ResponseField name="bid" type="number" required>
+      Current bid price (highest price a buyer will pay).
+    </ResponseField>
+    <ResponseField name="ask" type="number" required>
+      Current ask price (lowest price a seller will accept).
+    </ResponseField>
+    <ResponseField name="last" type="number" required>
+      Price of the most recent trade.
+    </ResponseField>
+    <ResponseField name="updatedAt" type="string" required>
+      ISO 8601 datetime of when this price entry was last updated, e.g. `2026-03-26T14:05:00.000Z`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+```json Sample response
+{
+  "prices": [
+    {
+      "instrumentId": "ad9e5345-35d3-41d5-a5d7-acb4c5e63b8a",
+      "bid": 1.08321,
+      "ask": 1.08334,
+      "last": 1.08328,
+      "updatedAt": "2026-03-26T14:05:00.000Z"
+    },
+    {
+      "instrumentId": "0e81e3ed-9b43-4495-82a0-e7ff5424a90b",
+      "bid": 87432.10,
+      "ask": 87450.00,
+      "last": 87441.55,
+      "updatedAt": "2026-03-26T14:05:01.123Z"
+    }
+  ]
+}
+```
+
+## Error responses
+
+| Status | Description |
+|---|---|
+| `404 Not Found` | Specific `ids` were requested but no matching prices exist in the cache or database. Response body: `"Prices for requested assets were not found."` |
+| `422 Unprocessable Entity` | One or more values in `ids` are not valid GUIDs. Response body contains FluentValidation error details. |
+
+```json 404 response
+"Prices for requested assets were not found."
+```
+
+```json 422 response
+{
+  "type": "https://tools.ietf.org/html/rfc4918#section-11.2",
+  "title": "One or more validation errors occurred.",
+  "status": 422,
+  "errors": {
+    "ids[0]": [
+      "Invalid ID format: 'not-a-guid'. Expected GUID."
+    ]
+  }
+}
+```

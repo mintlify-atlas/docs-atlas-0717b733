@@ -1,97 +1,55 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Fintacharts Asset Tracker"
+description: "A high-performance .NET 8 backend service that synchronizes financial instruments, streams real-time prices via WebSockets, and exposes market data through a REST API."
 ---
 
-## Setting up
+Fintacharts Asset Tracker connects to the Fintacharts platform to synchronize financial instruments, subscribe to live price feeds over WebSockets, and serve current and historical market data through a clean REST API.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get the service running locally in minutes with Docker Compose.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore all REST endpoints, parameters, and response schemas.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Understand the Vertical Slice Architecture and reactive event-driven design.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Configuration" icon="sliders" href="/configuration/environment-variables">
+    Configure credentials, connection strings, and logging levels.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## How it works
 
-Everything you need to create world-class documentation.
+<Steps>
+  <Step title="Deploy with Docker Compose">
+    Spin up the API and PostgreSQL database with a single command. No manual database setup required.
+  </Step>
+  <Step title="Seed instruments">
+    Call `GET /api/assets` once to fetch financial instruments from Fintacharts and store them locally. This also triggers the real-time price subscription engine.
+  </Step>
+  <Step title="Stream live prices">
+    The background worker maintains a WebSocket connection to Fintacharts and continuously updates bid, ask, and last prices for all tracked instruments.
+  </Step>
+  <Step title="Query market data">
+    Use `GET /api/prices` for live quotes and `GET /api/assets/{id}/history` for historical OHLC bars — all served from the local cache and database.
+  </Step>
+</Steps>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Key capabilities
 
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Real-time WebSocket streaming" icon="bolt">
+    Subscribes to Fintacharts L1 price feeds and processes bid/ask/last ticks as they arrive, with automatic reconnection on instrument changes.
+  </Card>
+  <Card title="Two-layer caching" icon="database">
+    In-memory `ConcurrentDictionary` for sub-millisecond reads backed by PostgreSQL UPSERT for persistence across restarts.
+  </Card>
+  <Card title="Reactive event bus" icon="arrows-rotate">
+    An in-memory event bus coordinates between the REST API and background WebSocket worker — no manual service restarts needed.
+  </Card>
+  <Card title="Automatic token management" icon="key">
+    Thread-safe token refresh with a built-in buffer ensures the service never makes API calls with expired credentials.
+  </Card>
+</CardGroup>
